@@ -7,6 +7,10 @@
 #include <vector>
 #include <iostream>
 #include <opencv2/opencv.hpp>
+#include <chrono>  
+#include <ctime>
+#include <iomanip>
+
 
 const int INPUT_SIZE = 224;
 const int OUTPUT_SIZE = 1000;
@@ -51,9 +55,6 @@ void preprocess(const cv::Mat& img, float* input) {
     memcpy(input + dst_size, channels[1].data, dst_size * sizeof(float));
     memcpy(input + 2 * dst_size, channels[2].data, dst_size * sizeof(float));
 
-
-    //    for (int i = 0; i < INPUT_SIZE * INPUT_SIZE * 3; i++) 
-    //      input[i] = resized.data[i];
 }
 
 
@@ -102,26 +103,37 @@ void postprocess(float* output, const std::vector<std::string>& labels) {
 	}
 }
 
+void compute_time(std::chrono::system_clock::time_point& start_time,const std::string st=""){
+	std::chrono::system_clock::time_point end_time= std::chrono::system_clock::now();
+        auto duration = (std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time)).count();
+	start_time=end_time;
+        std::cout << st << " cost time: " << (float)duration / 1000 << " s !" << std::endl;
+}
 
 
 int main(int argc, const char* argv[])
 {
+	std::chrono::system_clock::time_point start_time, end_time;
+	start_time = std::chrono::system_clock::now();
 	// deserialize TensorRT Engine
 	sample::Logger logger;
 	nvinfer1::IRuntime* runtime = nvinfer1::createInferRuntime(logger);
-	const std::string model_file = "models/resnet50.engine";
+	const std::string model_file = std::string("models/") + argv[1];//"models/resnet50.engine";
 	nvinfer1::ICudaEngine* engine = createDeserializeCudaEngine(runtime, model_file);
 
 	const int num_io_tensors = engine->getNbIOTensors();
 	for (int i = 0; i < num_io_tensors; ++i) {
 		const char* tensor_name = engine->getIOTensorName(i);
-		std::cout << "Valid IO Tensor Name: " << tensor_name << std::endl;
+		std::cout << "Valid IO Tensor Name: " << tensor_name<<" "<<static_cast<int32_t>(engine->getTensorDataType(tensor_name)) << std::endl;
 	}
 
 	// create context
 	nvinfer1::IExecutionContext* context = engine->createExecutionContext();
 
-
+	// input and output data
+	//size_t input_elem_num = 1 * 3 * 224 *  224;
+	//size_t output_elem_num = 1 * 10;
+	//std::vector<float> input(input_elem_num, 1.0f);
 	// 分配GPU内存
 	const int input_elem_num = 1 * 3 * INPUT_SIZE * INPUT_SIZE;
 	const int output_elem_num = 1 * OUTPUT_SIZE;
@@ -139,33 +151,38 @@ int main(int argc, const char* argv[])
 	cudaMallocAsync(&d_input, input_elem_num * sizeof(float), stream);
 	cudaMallocAsync(&d_output, output_elem_num * sizeof(float), stream);
 
+	compute_time(start_time,"model initialize");
 
 	// 加载并预处理图像
-	cv::Mat img = cv::imread("images/tabby_tiger_cat.jpg"); //binoculars.jpeg");
+	cv::Mat img = cv::imread(std::string("images/")+argv[2]);//tabby_tiger_cat.jpg"); //binoculars.jpeg");
 	if (img.empty()) {
 		std::cerr << "Failed to load image" << std::endl;
 		return -1;
 	}
 	preprocess(img, input.data());
 	std::cout<<"preprocess success!"<<std::endl;
+	compute_time(start_time,"preprocess");
+
 
 	// copy HtoD
 	cudaMemcpyAsync(d_input, input.data(), input_elem_num * sizeof(float), cudaMemcpyHostToDevice, stream);
 	std::cout<<"copy HtoD  success!"<<std::endl;
-
+        compute_time(start_time,"copy HtoD");
 
 	// inference
 	context->setTensorAddress("input", d_input);
 	context->setTensorAddress("output", d_output);
 	bool status = context->enqueueV3(stream);
 	std::cout<<"inference success!"<<std::endl;
+        compute_time(start_time,"inference");
 
-	cudaStreamSynchronize(stream);
 
 	// copy DtoH
 	cudaMemcpyAsync(output.data(), d_output, output_elem_num * sizeof(float), cudaMemcpyDeviceToHost, stream);
+	compute_time(start_time,"copy DtoH");
 
-
+	cudaStreamSynchronize(stream);
+	
 	// 加载类别标签
 	std::vector<std::string> labels;
 	std::ifstream labelFile("class_labels.txt");
@@ -176,14 +193,14 @@ int main(int argc, const char* argv[])
 
 	postprocess(output.data(), labels);
 	std::cout<<"postprocess success!"<<std::endl;
-
-
+	compute_time(start_time,"postprocess");
 
 	// release device memory
 	cudaFree(d_input);
 	cudaFree(d_output);
 
 	cudaStreamDestroy(stream);
+	compute_time(start_time,"free device");
 
 	return 0;
 }
